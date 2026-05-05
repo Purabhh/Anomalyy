@@ -1,5 +1,5 @@
 """
-Feature engineering for stock anomaly detection.
+Feature engineering for Anomalyy.
 Calculates technical indicators and derived features.
 """
 

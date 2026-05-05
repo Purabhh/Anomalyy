@@ -1,5 +1,5 @@
 """
-Visualization module for stock anomaly detection.
+Visualization module for Anomalyy.
 Generates interactive charts and dashboards using Plotly.
 """
 
@@ -609,7 +609,7 @@ class Visualization:
         <body>
             <div class="dashboard-container">
                 <div class="header">
-                    <h1>{symbol} - Stock Anomaly Detection Dashboard</h1>
+                    <h1>{symbol} - Anomalyy Dashboard</h1>
                     <p>Comprehensive analysis of market anomalies using multiple detection methods</p>
                 </div>
                 

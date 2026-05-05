@@ -1,4 +1,4 @@
-# Stock Market Anomaly Detection
+# Anomalyy
 ### CS 210: Data Management for Data Science
 
 A data pipeline that detects anomalous trading days in historical stock data using three complementary unsupervised machine learning methods, then explains detected anomalies using FOMC meeting dates, news sentiment, and cross-stock contagion analysis.
@@ -8,15 +8,12 @@ A data pipeline that detects anomalous trading days in historical stock data usi
 ## Installation
 
 ```bash
-git clone https://github.com/Purabhh/stock-anomaly-detection.git
-cd stock-anomaly-detection
+git clone https://github.com/Purabhh/Anomalyy.git
+cd Anomalyy
 pip install -r requirements.txt
 ```
 
-**Optional:** Set a NewsAPI key for news-based anomaly explanation:
-```bash
-export NEWS_API_KEY=your_key_here
-```
+No API keys required. News headlines come from [GDELT 2.0](https://www.gdeltproject.org/), a free open public-news index.
 
 ---
 
@@ -33,12 +30,13 @@ This runs the full pipeline: fetches 10 years of data for AAPL, MSFT, TSLA, AMZN
 ## Project Structure
 
 ```
-stock-anomaly-detection/
+Anomalyy/
 ├── main.py                     # End-to-end pipeline runner
 ├── requirements.txt
 ├── README.md
 ├── src/
-│   ├── data_ingestion.py       # yfinance + NewsAPI data fetching
+│   ├── data_ingestion.py       # yfinance price data fetching
+│   ├── news_gdelt.py           # GDELT 2.0 DOC API news fetcher
 │   ├── feature_engineering.py  # 50+ technical indicators
 │   ├── anomaly_detection.py    # Z-Score, Isolation Forest, LOF
 │   ├── database.py             # SQLite schema + CRUD
@@ -58,7 +56,7 @@ stock-anomaly-detection/
 
 ### Data Sources
 - **Historical prices**: `yfinance` — daily OHLCV data for AAPL, MSFT, TSLA, AMZN, ^GSPC (Jan 2015 – Dec 2024)
-- **News headlines**: `NewsAPI` — financial news with VADER sentiment scoring
+- **News headlines**: GDELT 2.0 DOC API — global financial news indexed since Feb 2015, scored with VADER for sentiment
 - **FOMC dates**: Hardcoded list of all ~80 Fed meeting dates from 2015–2024
 
 ### Feature Engineering (50+ features)
@@ -85,7 +83,7 @@ Anomalies confirmed by **≥ 2 methods** are classified as high-confidence. This
 ### Anomaly Classification
 Each detected anomaly is assigned one of four types:
 - **macroeconomic_event** — date within 2 days of an FOMC meeting
-- **earnings_surprise** — high news volume + strong sentiment (|compound| > 0.3)
+- **vader_sentiment_spike** — high news volume + strong VADER sentiment (|compound| > 0.3)
 - **sector_contagion** — 3+ stocks flagged within a 3-day window
 - **unexplained** — none of the above conditions met
 
@@ -119,11 +117,12 @@ anomalies(id PK, symbol FK, anomaly_date, z_score_flag, isolation_forest_flag, l
 
 ## Limitations
 
-1. **NewsAPI free tier**: Limited to the last 30 days of headlines. Historical news coverage is incomplete; FOMC-based classification is the most reliable explainer.
-2. **yfinance data quality**: Adjusted close prices may differ from raw prices. Split/dividend adjustments applied automatically.
-3. **Unsupervised evaluation**: No ground-truth anomaly labels exist, so precision-by-explanation is a proxy metric, not a true precision score.
-4. **Contamination assumption**: Isolation Forest assumes 10% contamination — this hyperparameter significantly affects sensitivity.
-5. **Survivorship bias**: Only currently-listed tickers are analyzed.
+1. **GDELT coverage start date**: The GDELT 2.0 DOC index begins Feb 18, 2015. The first ~6 weeks of the analysis window (Jan 1 – Feb 17, 2015) have no news coverage; the `vader_sentiment_spike` classifier cannot fire there.
+2. **GDELT keyword precision**: Headlines are matched by company name + ticker against a whitelist of major financial-news domains. Off-topic hits are reduced but not eliminated.
+3. **yfinance data quality**: Adjusted close prices may differ from raw prices. Split/dividend adjustments applied automatically.
+4. **Unsupervised evaluation**: No ground-truth anomaly labels exist, so precision-by-explanation is a proxy metric, not a true precision score.
+5. **Contamination assumption**: Isolation Forest assumes 10% contamination — this hyperparameter significantly affects sensitivity.
+6. **Survivorship bias**: Only currently-listed tickers are analyzed.
 
 ---
 

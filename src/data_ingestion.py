@@ -1,6 +1,6 @@
 """
-Data ingestion pipeline for stock market anomaly detection.
-Uses yfinance for price data and NewsAPI for news headlines.
+Data ingestion pipeline for Anomalyy.
+Uses yfinance for price data and GDELT 2.0 (via src.news_gdelt) for headlines.
 """
 
 import yfinance as yf
@@ -23,10 +23,9 @@ DEFAULT_END = '2024-12-31'
 class DataIngestion:
     """Handles data collection from yfinance and NewsAPI."""
     
-    def __init__(self, db_path: str = "stock_anomaly.db"):
+    def __init__(self, db_path: str = "anomalyy.db"):
         """Initialize with database connection."""
         self.db = StockDatabase(db_path)
-        self.news_api_key = None  # Will be loaded from environment
     
     def fetch_stock_data(self, symbol: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
         """
@@ -76,52 +75,53 @@ class DataIngestion:
             logger.error(f"Error fetching data for {symbol}: {e}")
             return pd.DataFrame()
     
-    def fetch_stock_data_by_date(self, symbol: str, start_date: str = DEFAULT_START, 
+    def fetch_stock_data_by_date(self, symbol: str, start_date: str = DEFAULT_START,
                                 end_date: str = DEFAULT_END, interval: str = "1d") -> pd.DataFrame:
         """
         Fetch historical stock data from yfinance using date range.
-        
-        Args:
-            symbol: Stock ticker symbol
-            start_date: Start date in YYYY-MM-DD format
-            end_date: End date in YYYY-MM-DD format
-            interval: Data interval (1d, 1wk, 1mo)
-        
-        Returns:
-            DataFrame with historical data
+
+        Returns a DataFrame with lowercase columns
+        ('date','open','high','low','close','adj_close','volume') so downstream
+        consumers (FeatureEngineer) can use it directly. The DB write happens
+        before normalization since `add_price_data` expects yfinance's
+        title-case columns.
         """
         try:
             logger.info(f"Fetching data for {symbol} ({start_date} to {end_date}, interval: {interval})")
-            
+
             ticker = yf.Ticker(symbol)
-            
-            # Get historical data by date range
             df = ticker.history(start=start_date, end=end_date, interval=interval)
-            
+
             if df.empty:
                 logger.warning(f"No data returned for {symbol}")
                 return pd.DataFrame()
-            
-            # Reset index to make Date a column
+
             df = df.reset_index()
-            
-            # Add metadata
+
+            # Newer yfinance versions auto-adjust Close and drop "Adj Close".
+            # Synthesize it so add_price_data's required-columns check passes.
+            if 'Adj Close' not in df.columns and 'Close' in df.columns:
+                df['Adj Close'] = df['Close']
+
             info = ticker.info
             stock_name = info.get('longName', symbol)
             sector = info.get('sector', 'Unknown')
             industry = info.get('industry', 'Unknown')
             country = info.get('country', 'US')
             market_cap = info.get('marketCap')
-            
-            # Add stock to database
+
             self.db.add_stock(symbol, stock_name, sector, industry, country, market_cap)
-            
-            # Add price data to database
             self.db.add_price_data(symbol, df)
-            
+
+            # Normalize to lowercase column names for downstream FeatureEngineer
+            column_map = {'Date': 'date', 'Open': 'open', 'High': 'high',
+                          'Low': 'low', 'Close': 'close', 'Volume': 'volume',
+                          'Adj Close': 'adj_close'}
+            df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
+
             logger.info(f"Successfully fetched {len(df)} records for {symbol} from {start_date} to {end_date}")
             return df
-            
+
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {e}")
             return pd.DataFrame()
@@ -190,103 +190,35 @@ class DataIngestion:
         
         return results
     
-    def fetch_news_data(self, symbol: str, days_back: int = 30, api_key: str = None):
+    def fetch_news_data(self, symbol: str, start_date: str, end_date: str) -> List[Dict]:
         """
-        Fetch news articles for a stock using NewsAPI free tier.
-        
-        Note: NewsAPI free tier has limitations (100 requests/day, articles from last month)
-        
-        Args:
-            symbol: Stock ticker symbol
-            days_back: Number of days to look back (max 30 for free tier)
-            api_key: NewsAPI key (optional, can be set via environment)
+        Fetch news articles for a stock from GDELT 2.0 across [start_date, end_date].
+
+        Returns NewsAPI-shape dicts; pass directly into `_process_and_store_news`.
         """
-        if api_key is None:
-            api_key = self.news_api_key
-        
-        if not api_key:
-            logger.warning("No NewsAPI key provided. Skipping news fetch.")
-            return []
-        
-        try:
-            import requests
-            from datetime import datetime, timedelta
-            
-            # Calculate date range
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=min(days_back, 30))  # Free tier limit
-            
-            # Format dates for NewsAPI
-            from_date = start_date.strftime("%Y-%m-%d")
-            to_date = end_date.strftime("%Y-%m-%d")
-            
-            # NewsAPI endpoint
-            url = "https://newsapi.org/v2/everything"
-            
-            # Parameters
-            params = {
-                'q': symbol,  # Search for stock symbol
-                'from': from_date,
-                'to': to_date,
-                'sortBy': 'publishedAt',
-                'language': 'en',
-                'apiKey': api_key,
-                'pageSize': 100  # Max for free tier
-            }
-            
-            logger.info(f"Fetching news for {symbol} from {from_date} to {to_date}")
-            
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if data['status'] != 'ok':
-                logger.error(f"NewsAPI error: {data.get('message', 'Unknown error')}")
-                return []
-            
-            articles = data.get('articles', [])
-            logger.info(f"Found {len(articles)} news articles for {symbol}")
-            
-            return articles
-            
-        except Exception as e:
-            logger.error(f"Error fetching news for {symbol}: {e}")
-            return []
-    
+        from .news_gdelt import fetch_for_ticker
+        return fetch_for_ticker(symbol, start_date, end_date)
+
     def update_all_data(self, symbols: List[str], update_frequency: str = "daily"):
         """
         Update all data for tracked stocks based on frequency.
-        
+
         Args:
             symbols: List of stock symbols to update
             update_frequency: 'daily', 'weekly', or 'monthly'
         """
         logger.info(f"Starting {update_frequency} data update for {len(symbols)} stocks")
-        
-        # Determine period based on frequency
+
         if update_frequency == "daily":
-            period = "1mo"  # Get last month for daily updates
+            period = "1mo"
         elif update_frequency == "weekly":
             period = "3mo"
-        else:  # monthly
+        else:
             period = "1y"
-        
-        # Fetch price data
+
         price_results = self.fetch_multiple_stocks(symbols, period=period, delay=1.5)
-        
-        # Fetch news data (if API key available)
-        news_results = {}
-        if self.news_api_key:
-            for symbol in symbols:
-                articles = self.fetch_news_data(symbol, days_back=30)
-                news_results[symbol] = articles
-                
-                # Process and store articles with sentiment
-                self._process_and_store_news(symbol, articles)
-        
         logger.info(f"Data update completed. Price data for {len(price_results)} stocks.")
-        return price_results, news_results
+        return price_results
     
     def _process_and_store_news(self, symbol: str, articles: List[Dict]):
         """Process news articles with VADER sentiment analysis and store in database."""

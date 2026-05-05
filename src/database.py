@@ -1,5 +1,5 @@
 """
-SQLite database schema for stock anomaly detection system.
+SQLite database schema for Anomalyy.
 4-table design: stocks, price_data, news_articles, anomalies
 """
 
@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class StockDatabase:
-    """SQLite database manager for stock anomaly detection system."""
-    
-    def __init__(self, db_path: str = "stock_anomaly.db"):
+    """SQLite database manager for Anomalyy."""
+
+    def __init__(self, db_path: str = "anomalyy.db"):
         """Initialize database connection and create tables if they don't exist."""
         self.db_path = db_path
         self.conn = None
@@ -83,7 +83,7 @@ class StockDatabase:
         )
         """)
         
-        # Table 4: anomalies - detected anomalies with agreement scores
+        # Table 4: anomalies - detected anomalies with agreement scores and explanation label
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS anomalies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,8 +92,9 @@ class StockDatabase:
             z_score_flag BOOLEAN,
             isolation_forest_flag BOOLEAN,
             lof_flag BOOLEAN,
-            agreement_score INTEGER,  # 0-3 (how many methods flagged it)
+            agreement_score INTEGER,
             confidence REAL,
+            label TEXT,
             price_change_1d REAL,
             price_change_5d REAL,
             price_change_20d REAL,
@@ -104,6 +105,12 @@ class StockDatabase:
             UNIQUE(symbol, anomaly_date)
         )
         """)
+
+        # Migrate existing DBs that predate the label column
+        try:
+            cursor.execute("ALTER TABLE anomalies ADD COLUMN label TEXT")
+        except sqlite3.OperationalError:
+            pass
         
         # Create indexes for performance
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_data_symbol_date ON price_data(symbol, date)")
@@ -167,27 +174,35 @@ class StockDatabase:
         ))
         self.conn.commit()
     
-    def add_anomaly(self, symbol: str, anomaly_date: str, z_score_flag: bool, 
+    def add_anomaly(self, symbol: str, anomaly_date: str, z_score_flag: bool,
                    isolation_forest_flag: bool, lof_flag: bool, confidence: float,
-                   price_changes: Dict, avg_sentiment: float = None, news_count: int = 0):
-        """Add a detected anomaly."""
-        agreement_score = sum([z_score_flag, isolation_forest_flag, lof_flag])
-        
+                   price_changes: Dict = None, avg_sentiment: float = None,
+                   news_count: int = 0, label: str = 'unexplained',
+                   agreement_score: int = None, anomaly_type: str = None):
+        """Add a detected anomaly. `anomaly_type` is accepted as an alias for `label`."""
+        if anomaly_type is not None and label == 'unexplained':
+            label = anomaly_type
+        if agreement_score is None:
+            agreement_score = sum([bool(z_score_flag), bool(isolation_forest_flag), bool(lof_flag)])
+        if price_changes is None:
+            price_changes = {}
+
         cursor = self.conn.cursor()
         cursor.execute("""
-        INSERT OR REPLACE INTO anomalies 
-        (symbol, anomaly_date, z_score_flag, isolation_forest_flag, lof_flag, 
-         agreement_score, confidence, price_change_1d, price_change_5d, price_change_20d,
+        INSERT OR REPLACE INTO anomalies
+        (symbol, anomaly_date, z_score_flag, isolation_forest_flag, lof_flag,
+         agreement_score, confidence, label, price_change_1d, price_change_5d, price_change_20d,
          avg_sentiment, news_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             symbol,
             anomaly_date,
-            int(z_score_flag),
-            int(isolation_forest_flag),
-            int(lof_flag),
+            int(bool(z_score_flag)),
+            int(bool(isolation_forest_flag)),
+            int(bool(lof_flag)),
             agreement_score,
             confidence,
+            label,
             price_changes.get('1d', 0),
             price_changes.get('5d', 0),
             price_changes.get('20d', 0),
@@ -195,7 +210,7 @@ class StockDatabase:
             news_count
         ))
         self.conn.commit()
-        logger.info(f"Added anomaly for {symbol} on {anomaly_date} (agreement: {agreement_score}/3)")
+        logger.info(f"Added anomaly for {symbol} on {anomaly_date} (agreement: {agreement_score}/3, label: {label})")
     
     def get_price_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
         """Retrieve price data for a stock."""

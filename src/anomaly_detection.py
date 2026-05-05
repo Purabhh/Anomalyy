@@ -348,44 +348,54 @@ class AnomalyDetector:
 
     # NEW METHODS ADDED FOR CS 210 PROJECT
 
-    def classify_anomaly_type(self, anomaly_date: datetime, fomc_dates: List[datetime], 
+    def classify_anomaly_type(self, anomaly_date, fomc_dates: List,
+                             contagion_dates: Optional[List] = None,
                              news_df: Optional[pd.DataFrame] = None) -> str:
         """
-        Classify anomaly type based on date, FOMC meetings, and news data.
-        
+        Classify anomaly type based on date, FOMC meetings, contagion dates, and news.
+
+        Precedence: macroeconomic_event > sector_contagion > vader_sentiment_spike > unexplained.
+
         Args:
-            anomaly_date: Date of the anomaly
-            fomc_dates: List of FOMC meeting dates
-            news_df: DataFrame with news data (optional)
-        
+            anomaly_date: Date of the anomaly (datetime, date, or pandas Timestamp)
+            fomc_dates: List of FOMC meeting dates (datetime.date)
+            contagion_dates: List of dates flagged by contagion analysis (datetime.date)
+            news_df: DataFrame with news data, must include 'date' and 'sentiment_compound'
+
         Returns:
-            Classification: 'earnings_surprise', 'macroeconomic_event', 
-                           'sector_contagion', or 'unexplained'
+            'macroeconomic_event' | 'sector_contagion' | 'vader_sentiment_spike' | 'unexplained'
         """
-        # Check for macroeconomic event (FOMC related)
+        try:
+            ad = pd.to_datetime(anomaly_date).date()
+        except Exception:
+            return 'unexplained'
+
+        # 1. Macroeconomic event (FOMC ±2 days)
         for fomc_date in fomc_dates:
-            if abs((anomaly_date - fomc_date).days) <= 2:
+            fd = fomc_date.date() if hasattr(fomc_date, 'date') else fomc_date
+            if abs((ad - fd).days) <= 2:
                 return 'macroeconomic_event'
-        
-        # Check for earnings surprise (news volume + sentiment spike)
-        if news_df is not None and not news_df.empty:
-            # Filter news for the anomaly date window (±1 day)
-            mask = (news_df['date'] >= anomaly_date - pd.Timedelta(days=1)) & \
-                   (news_df['date'] <= anomaly_date + pd.Timedelta(days=1))
+
+        # 2. Sector contagion (date present in precomputed contagion list)
+        if contagion_dates:
+            for cd in contagion_dates:
+                cd_norm = cd.date() if hasattr(cd, 'date') else cd
+                if ad == cd_norm:
+                    return 'sector_contagion'
+
+        # 3. VADER sentiment spike (news volume + strong polarity within ±1 day)
+        if news_df is not None and not news_df.empty and 'sentiment_compound' in news_df.columns:
+            ad_ts = pd.Timestamp(ad)
+            news_dates = pd.to_datetime(news_df['date'])
+            mask = (news_dates >= ad_ts - pd.Timedelta(days=1)) & \
+                   (news_dates <= ad_ts + pd.Timedelta(days=1))
             window_news = news_df[mask]
-            
             if not window_news.empty:
-                # Calculate news volume and average sentiment
                 news_volume = len(window_news)
                 avg_sentiment = window_news['sentiment_compound'].abs().mean()
-                
-                # Thresholds for earnings surprise
-                if news_volume >= 5 and avg_sentiment >= 0.5:
-                    return 'earnings_surprise'
-        
-        # Note: sector_contagion is determined separately by contagion_analysis.py
-        # This method will be called after contagion analysis
-        
+                if news_volume >= 5 and avg_sentiment >= 0.3:
+                    return 'vader_sentiment_spike'
+
         return 'unexplained'
     
     def precision_by_explanation(self, anomalies_df: pd.DataFrame) -> float:

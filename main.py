@@ -1,5 +1,5 @@
 """
-main.py - End-to-end pipeline for Stock Market Anomaly Detection
+main.py - End-to-end pipeline for Anomalyy
 CS 210: Data Management for Data Science
 Author: Purabh Singh
 """
@@ -11,6 +11,14 @@ from pathlib import Path
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
+
+# Windows consoles default to cp1252 and crash on '✓' (U+2713).
+# Force UTF-8 on stdout/stderr so logging and progress prints work everywhere.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except (AttributeError, ValueError):
+    pass
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -28,11 +36,11 @@ def run_pipeline():
     from src.contagion_analysis import cross_stock_correlation, detect_sector_contagion
 
     print("\n" + "="*60)
-    print("  STOCK MARKET ANOMALY DETECTION PIPELINE")
+    print("  ANOMALYY PIPELINE")
     print("  CS 210: Data Management for Data Science")
     print("="*60 + "\n")
 
-    db_path = Path(__file__).parent / "stock_anomaly_detection.db"
+    db_path = Path(__file__).parent / "anomalyy.db"
     viz_dir = Path(__file__).parent / "visualizations"
     viz_dir.mkdir(exist_ok=True)
 
@@ -107,31 +115,52 @@ def run_pipeline():
     except Exception as e:
         logger.error(f"Contagion analysis failed: {e}")
 
+    news_dict = {}
+    print(f"\n[4a/6] Fetching GDELT news ({DEFAULT_START} to {DEFAULT_END})...")
+    for ticker in all_results.keys():
+        try:
+            articles = ingestion.fetch_news_data(ticker, start_date=DEFAULT_START, end_date=DEFAULT_END)
+            ingestion._process_and_store_news(ticker, articles)
+            news_df = db.get_news_for_period(ticker, DEFAULT_START, DEFAULT_END)
+            if not news_df.empty:
+                news_df = news_df.rename(columns={'published_at': 'date'})
+                news_dict[ticker] = news_df
+            print(f"  ✓ {ticker}: {len(articles)} articles fetched, {len(news_df)} stored")
+        except Exception as e:
+            logger.error(f"News fetch failed for {ticker}: {e}")
+
     for ticker, results in all_results.items():
-        dates = results.index if results.index.name == 'date' else pd.to_datetime(results.index)
-        types = [detector.classify_anomaly_type(d, fomc_dates, contagion_dates=contagion_dates) for d in dates]
+        dates = results['date'] if 'date' in results.columns else pd.to_datetime(results.index)
+        ticker_news = news_dict.get(ticker)
+        types = [
+            detector.classify_anomaly_type(d, fomc_dates,
+                                           contagion_dates=contagion_dates,
+                                           news_df=ticker_news)
+            for d in dates
+        ]
         all_results[ticker]['anomaly_type'] = types
 
     # Step 5: Save to database
     print(f"\n[5/6] Saving to database...")
     for ticker, results in all_results.items():
         try:
-            high_conf = results[results.get('agreement_score', pd.Series(0, index=results.index)) >= 2] \
+            high_conf = results[results['agreement_score'] >= 2] \
                 if 'agreement_score' in results.columns else results
-            for idx, row in high_conf.iterrows():
+            for _, row in high_conf.iterrows():
                 try:
+                    anomaly_date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
                     db.add_anomaly(
                         symbol=ticker,
-                        anomaly_date=str(idx)[:10],
-                        z_score_flag=bool(row.get('z_score_flag', False)),
-                        isolation_forest_flag=bool(row.get('isolation_forest_flag', False)),
-                        lof_flag=bool(row.get('lof_flag', False)),
+                        anomaly_date=anomaly_date,
+                        z_score_flag=bool(row.get('z_score_anomaly', False)),
+                        isolation_forest_flag=bool(row.get('isolation_forest_anomaly', False)),
+                        lof_flag=bool(row.get('lof_anomaly', False)),
                         agreement_score=int(row.get('agreement_score', 0)),
                         confidence=float(row.get('confidence', 0)),
-                        anomaly_type=row.get('anomaly_type', 'unexplained')
+                        label=row.get('anomaly_type', 'unexplained'),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Row save failed for {ticker}: {e}")
             print(f"  ✓ {ticker}: {len(high_conf)} anomalies saved")
         except Exception as e:
             logger.error(f"DB save failed for {ticker}: {e}")
@@ -151,7 +180,7 @@ def run_pipeline():
     print("  SUMMARY REPORT")
     print("="*60)
     total = 0
-    type_counts = {'macroeconomic_event': 0, 'earnings_surprise': 0,
+    type_counts = {'macroeconomic_event': 0, 'vader_sentiment_spike': 0,
                    'sector_contagion': 0, 'unexplained': 0}
     for ticker, results in all_results.items():
         hc = results[results['agreement_score'] >= 2] if 'agreement_score' in results.columns else results
